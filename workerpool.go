@@ -10,15 +10,14 @@ import (
 )
 
 const (
-	// If workes idle for at least this period of time, then stop a worker.
+	// 如果工人至少在这段时间内处于闲置状态，那么就停止一名工人的工作。
 	idleTimeout = 2 * time.Second
 )
 
 // New creates and starts a pool of worker goroutines.
 //
-// The maxWorkers parameter specifies the maximum number of workers that can
-// execute tasks concurrently. When there are no incoming tasks, workers are
-// gradually stopped until there are no remaining workers.
+// MaxWorkers参数指定可以并发执行任务的最大工人数量。
+// 当没有传入的任务时，工人会逐渐停止，直到没有剩余的工人为止。
 func New(maxWorkers int) *WorkerPool {
 	// There must be at least one worker.
 	if maxWorkers < 1 {
@@ -60,20 +59,16 @@ func (p *WorkerPool) Size() int {
 	return p.maxWorkers
 }
 
-// Stop stops the worker pool and waits for only currently running tasks to
-// complete. Pending tasks that are not currently running are abandoned. Tasks
-// must not be submitted to the worker pool after calling stop.
+// Stop将停止工作池并仅等待当前正在运行的任务完成。
+// 当前未运行的挂起任务将被放弃。在调用Stop之后，任务不得提交到工作池。
 //
-// Since creating the worker pool starts at least one goroutine, for the
-// dispatcher, Stop() or StopWait() should be called when the worker pool is no
-// longer needed.
+// 由于创建工作池至少会启动一个goroutine，因此对于调度程序来说，当不再需要工作池时，应该调用Stop()或StopWait()。
 func (p *WorkerPool) Stop() {
 	p.stop(false)
 }
 
-// StopWait stops the worker pool and waits for all queued tasks tasks to
-// complete. No additional tasks may be submitted, but all pending tasks are
-// executed by workers before this function returns.
+// StopWait停止工作池，并等待所有排队的任务任务完成。
+// 不能提交额外任务，但是在此函数返回之前，工人执行所有挂起的任务。
 func (p *WorkerPool) StopWait() {
 	p.stop(true)
 }
@@ -87,30 +82,24 @@ func (p *WorkerPool) Stopped() bool {
 
 // Submit enqueues a function for a worker to execute.
 //
-// Any external values needed by the task function must be captured in a
-// closure. Any return values should be returned over a channel that is
-// captured in the task function closure.
-//
-// Submit will not block regardless of the number of tasks submitted. Each task
-// is immediately given to an available worker or to a newly started worker. If
-// there are no available workers, and the maximum number of workers are
-// already created, then the task is put onto a waiting queue.
-//
-// When there are tasks on the waiting queue, any additional new tasks are put
-// on the waiting queue. Tasks are removed from the waiting queue as workers
-// become available.
-//
-// As long as no new tasks arrive, one available worker is shutdown each time
-// period until there are no more idle workers. Since the time to start new
-// goroutines is not significant, there is no need to retain idle workers
-// indefinitely.
+// 任务函数所需的任何外部值都必须在闭包中捕获。任何返回值都应该通过任务函数闭包中捕获的通道返回。
+// 
+// 无论提交的任务数量如何，Submit都不会阻塞。
+// 每个任务都会立即分配给可用的工作人员或新启动的工作人员。
+// 如果没有可用的工作者，并且已经创建了最大数量的工作者，则该任务将被放入等待队列中。
+// 
+// 当等待队列中有任务时，任何额外的新任务都会放置在等待队列中。
+// 当工作线程可用时，将从等待队列中移除任务。
+// 
+// 只要没有新任务到达，每个时间段就会关闭一个可用的工作线程，直到没有更多的闲置工作线程为止。
+// 由于开始新的goroutines的时间并不重要，因此无需无限期地保留闲置的工作线程。
 func (p *WorkerPool) Submit(task func()) {
 	if task != nil {
 		p.taskQueue <- task
 	}
 }
 
-// SubmitWait enqueues the given function and waits for it to be executed.
+// SubmitWait将给定函数排入队列并等待其执行。
 func (p *WorkerPool) SubmitWait(task func()) {
 	if task == nil {
 		return
@@ -118,8 +107,14 @@ func (p *WorkerPool) SubmitWait(task func()) {
 	doneChan := make(chan struct{})
 	p.taskQueue <- func() {
 		task()
+		// 关闭后的通道有以下特点：
+		// 1.对一个关闭的通道再发送值就会导致panic。
+		// 2.对一个关闭的通道进行接收会一直获取值直到通道为空。
+		// 3.对一个关闭的并且没有值的通道执行接收操作会得到对应类型的零值。
+		// 4.关闭一个已经关闭的通道会导致panic。
 		close(doneChan)
 	}
+	// 如果接收操作先执行，接收方的goroutine将阻塞，直到另一个goroutine在该通道上发送一个值或者这个通道已被关闭。
 	<-doneChan
 }
 
@@ -132,11 +127,12 @@ func (p *WorkerPool) WaitingQueueSize() int {
 // unavailable to run tasks. Pause returns when all workers are waiting. Tasks
 // can continue to be queued to the workerpool, but are not executed until the
 // Context is canceled or times out.
+// Pause会导致所有工作线程在给定的上下文上等待，从而使他们无法运行任务。
+// 当所有工作线程都在等待时，Pause返回。
+// 任务可以继续排队到workerpool，但在上下文被取消或超时之前不会执行。
 //
-// Calling Pause when the worker pool is already paused causes Pause to wait
-// until all previous pauses are canceled. This allows a goroutine to take
-// control of pausing and unpausing the pool as soon as other goroutines have
-// unpaused it.
+// 当workpool已经暂停时调用Pause会导致Pause等待，直到所有先前的pause被取消。
+// 这使一个goroutine能够在其他Goroutines停止Pause后立即控制Pause和停止Pause游泳池。
 //
 // When the workerpool is stopped, workers are unpaused and queued tasks are
 // executed during StopWait.
